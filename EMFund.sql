@@ -10,5 +10,4 @@ CREATE TABLE IF NOT EXISTS Return (
         Name,
         TradingDay
     )
-)
-WITHOUT ROWID;
+);
