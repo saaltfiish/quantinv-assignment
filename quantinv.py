@@ -17,8 +17,8 @@ from bs4 import BeautifulSoup as bs
 from utils import logger
 
 PAGESIZE = 1000
-YEAR_NTD = 252
-RATE_R_F = 2.5
+YEAR_TNR = 365
+RATE_R_F = 0.025
 PATH_LDB = "data/local_db.csv"
 FUND_NUM = 20
 DATA_DIR = "data"
@@ -159,7 +159,7 @@ class DBFund(object):
                     "Name": cut["Name"].values[0],
                     "Year": key[1],
                     "Month": key[2],
-                    "Return": cut["Return"].mean() * YEAR_NTD / 12,
+                    "Return": (cut["Return"].values[:-1] + 1).prod() - 1,
                 }
                 tmp.append(row)
         else:
@@ -168,21 +168,21 @@ class DBFund(object):
                 cut = src.loc[src["Code"] == cc, :].copy()
                 row = {"Code": cc, "Name": cut["Name"].values[0]}
                 logger.debug(f"making report for {cc} {row['Name']}")
+                cnt = (pd.to_datetime(cut['TradingDay'].values[0]) - pd.to_datetime(cut['TradingDay'].values[-1])).days
                 row["TotalReturn"] = (cut["Return"] + 1).prod() - 1
-                row["YearReturn"] = cut["Return"].mean() * YEAR_NTD
-                row["TotalShapre"] = (cut["Return"].mean() * YEAR_NTD - RATE_R_F) / (
-                    np.std(cut["Return"]) * np.sqrt(YEAR_NTD)
+                row["YearReturn"] = row["TotalReturn"] / cnt * YEAR_TNR
+                row["TotalShapre"] = (row["YearReturn"] - RATE_R_F) / (
+                    np.std(cut["Return"]) * np.sqrt(YEAR_TNR)
                 )
                 row["TotalMaxDrawDown"] = cut["CumNAV"].min() - 1
-                # tmp.append(row)
                 cut["year"] = cut["TradingDay"].str.slice(0, 4)
                 for yy in cut["year"].unique():
                     yut = cut.loc[cut["year"] == yy, :].copy()
                     logger.debug(f"making report for {cc} {row['Name']} {yy}")
-                    row[f"{yy}_Return"] = yut["Return"].mean() * YEAR_NTD
-                    row[f"{yy}_Shapre"] = (
-                        yut["Return"].mean() * YEAR_NTD - RATE_R_F
-                    ) / (np.std(yut["Return"]) * np.sqrt(YEAR_NTD))
+                    row[f"{yy}_Return"] = (yut["Return"].values[:-1] + 1).prod() - 1
+                    row[f"{yy}_Shapre"] = (row[f"{yy}_Return"] - RATE_R_F) / (
+                        np.std(yut["Return"]) * np.sqrt(YEAR_TNR)
+                    )
                     row[f"{yy}_MaxDrawDown"] = yut["CumNAV"].min() - 1
                 tmp.append(row)
         ret = pd.DataFrame().from_records(tmp)
