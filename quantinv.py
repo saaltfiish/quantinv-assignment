@@ -8,6 +8,7 @@ import re
 import sys
 import time
 from typing import List, Union
+import numpy as np
 
 import pandas as pd
 import requests
@@ -16,8 +17,10 @@ from bs4 import BeautifulSoup as bs
 from utils import logger
 
 PAGESIZE = 1000
+YEAR_NTD = 252
+RATE_R_F = 2.5
 PATH_LDB = "data/local_db.csv"
-FUND_NUM = 2
+FUND_NUM = 20
 DATA_DIR = "data"
 if not os.path.exists(DATA_DIR):
     os.mkdir(DATA_DIR)
@@ -81,7 +84,7 @@ class EMFund(object):
         mat = re.search(pat, rsp)
         if mat:
             dat = json.loads(mat.group(1))
-            logger.info(f"load fund metadata online success")
+            logger.debug(f"load fund metadata online success")
         else:
             msg = "load fund metadata online failure"
             logger.error(msg)
@@ -120,7 +123,7 @@ class DBFund(object):
     def load(self):
         if self.local:
             if os.path.exists(PATH_LDB):
-                self.pdata = pd.read_csv(PATH_LDB)
+                self.pdata = pd.read_csv(PATH_LDB, dtype={"Code": str})
         return
 
     def empty(self) -> bool:
@@ -129,17 +132,61 @@ class DBFund(object):
         return False
 
     def add(self, fund: Union[EMFund, pd.DataFrame]) -> None:
-        if isinstance(fund, EMFund):
-            self.pdata = pd.concat([self.pdata, fund.format_dataframe()])
-        else:
-            self.pdata = pd.concat([self.pdata, fund])
-        self.pdata.drop_duplicates(
-            subset=["Code", "Name", "TradingDay"], keep="first", inplace=True
-        )
+        if self.local:
+            if isinstance(fund, EMFund):
+                self.pdata = pd.concat([self.pdata, fund.format_dataframe()])
+            else:
+                self.pdata = pd.concat([self.pdata, fund])
+            self.pdata.drop_duplicates(
+                subset=["Code", "Name", "TradingDay"], keep="first", inplace=True
+            )
         return
 
     def save(self) -> None:
-        self.pdata.to_csv(PATH_LDB, index=False)
+        if self.local:
+            self.pdata.to_csv(PATH_LDB, index=False)
+        return
+
+    def make_repo(self, month: bool = False) -> pd.DataFrame:
+        tmp = []
+        if month:
+            src = self.pdata.copy()
+            src["year"] = src["TradingDay"].str.slice(0, 4)
+            src["month"] = src["TradingDay"].str.slice(5, 7)
+            for key, cut in src.groupby(["Code", "year", "month"]):
+                row = {
+                    "Code": key[0],
+                    "Name": cut["Name"].values[0],
+                    "Year": key[1],
+                    "Month": key[2],
+                    "Return": cut["Return"].mean() * YEAR_NTD / 12,
+                }
+                tmp.append(row)
+        else:
+            src = self.pdata.copy()
+            for cc in src["Code"].unique():
+                cut = src.loc[src["Code"] == cc, :].copy()
+                row = {"Code": cc, "Name": cut["Name"].values[0]}
+                logger.debug(f"making report for {cc} {row['Name']}")
+                row["TotalReturn"] = (cut["Return"] + 1).prod() - 1
+                row["YearReturn"] = cut["Return"].mean() * YEAR_NTD
+                row["TotalShapre"] = (cut["Return"].mean() * YEAR_NTD - RATE_R_F) / (
+                    np.std(cut["Return"]) * np.sqrt(YEAR_NTD)
+                )
+                row["TotalMaxDrawDown"] = cut["CumNAV"].min() - 1
+                # tmp.append(row)
+                cut["year"] = cut["TradingDay"].str.slice(0, 4)
+                for yy in cut["year"].unique():
+                    yut = cut.loc[cut["year"] == yy, :].copy()
+                    logger.debug(f"making report for {cc} {row['Name']} {yy}")
+                    row[f"{yy}_Return"] = yut["Return"].mean() * YEAR_NTD
+                    row[f"{yy}_Shapre"] = (
+                        yut["Return"].mean() * YEAR_NTD - RATE_R_F
+                    ) / (np.std(yut["Return"]) * np.sqrt(YEAR_NTD))
+                    row[f"{yy}_MaxDrawDown"] = yut["CumNAV"].min() - 1
+                tmp.append(row)
+        ret = pd.DataFrame().from_records(tmp)
+        return ret
 
 
 def inject_to_db(file: str = None) -> None:
@@ -164,7 +211,7 @@ def inject_to_db(file: str = None) -> None:
         # 处理每一行的内容
         code = tr.find("td", {"class": "bzdm"}).text
         name = tr.find("td", {"class": "tol"}).find("a").text
-        logger.debug(f"{i} code={code}, name={name}")
+        logger.info(f"{i} code={code}, name={name}")
         fund = EMFund(code, name)
         fund.get_data()
         db.add(fund)
@@ -186,10 +233,15 @@ if __name__ == "__main__":
     db = DBFund(args.local)
     db.load()
     if db.empty():
-        # 不加参数就是用爬虫抓取注入数据库
+        logger.warning("empty db, injecting data...")
+        # 不加参数就是用爬虫爬网页注入数据库
         inject_to_db()
         # 加文件路径就是用本地文件注入数据库
-        inject_to_db(file="data/db_copy.csv")
+        # inject_to_db(file="data/copy_db.csv")
         db.save()
+    d1 = db.make_repo(month=False)
+    d1.to_csv("data/year_repo.csv", index=False)
+    d2 = db.make_repo(month=True)
+    d2.to_csv("data/month_repo.csv", index=False)
 
     sys.exit(0)
