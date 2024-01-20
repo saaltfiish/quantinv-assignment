@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import sys
 import time
 from typing import List, Union
@@ -19,8 +20,10 @@ from utils import logger
 PAGESIZE = 1000
 YEAR_TNR = 365
 RATE_R_F = 0.025
-PATH_LDB = "data/local_db.csv"
 FUND_NUM = 20
+NAME_TAB = "Return"
+PATH_SQL = "EMFund.db"
+PATH_LDB = "data/local_db.csv"
 DATA_DIR = "data"
 if not os.path.exists(DATA_DIR):
     os.mkdir(DATA_DIR)
@@ -110,8 +113,11 @@ class EMFund(object):
                 msg = "parse fund data failure"
                 logger.error(msg)
                 raise ValueError(msg)
-            logger.debug(dat["PageIndex"])
-            self.data += dat["Data"]["LSJZList"]
+            tmp = pd.DataFrame().from_records(dat["Data"]["LSJZList"])
+            tmp["LJJZ"] = tmp["LJJZ"].astype(float)
+            tmp["JZZZL"] = (tmp["LJJZ"] - tmp["LJJZ"].shift(-1)) / tmp["LJJZ"].shift(-1)
+            tmp["JZZZL"].values[-1] = 0
+            self.data += tmp.to_dict(orient="records")
         return
 
 
@@ -119,32 +125,66 @@ class DBFund(object):
     def __init__(self, local: bool = False) -> None:
         self.local = local
         self.pdata = pd.DataFrame()
+        self.db_path = None
+        self.db_conn = None
+        self.db_curs = None
+        self.db_load = False
+        if local:
+            logger.warning(f"DBFund running with local file: {PATH_LDB}, ignore db")
+        else:
+            self.db_path = PATH_SQL
+            logger.warning(f"DBFund running with db: {PATH_SQL}, ignore local file")
+        return
+
+    def __del__(self) -> None:
+        if self.db_conn:
+            self.db_conn.close()
+        return
+
+    def connect(self) -> None:
+        try:
+            self.db_conn = sqlite3.connect(self.db_path)
+            self.db_curs = self.db_conn.cursor()
+            logger.info(f"Connected to sqlite db: {self.db_path}")
+        except sqlite3.Error as e:
+            logger.error(f"Error connecting to sqlite db: {e}")
 
     def load(self):
         if self.local:
             if os.path.exists(PATH_LDB):
                 self.pdata = pd.read_csv(PATH_LDB, dtype={"Code": str})
+        else:
+            if self.db_conn is None:
+                self.connect()
+            query = f"SELECT * FROM {NAME_TAB};"
+            self.pdata = pd.read_sql_query(query, self.db_conn)
         return
 
     def empty(self) -> bool:
-        if self.local:
-            return len(self.pdata) == 0
-        return False
+        return len(self.pdata) == 0
 
     def add(self, fund: Union[EMFund, pd.DataFrame]) -> None:
-        if self.local:
-            if isinstance(fund, EMFund):
-                self.pdata = pd.concat([self.pdata, fund.format_dataframe()])
-            else:
-                self.pdata = pd.concat([self.pdata, fund])
-            self.pdata.drop_duplicates(
-                subset=["Code", "Name", "TradingDay"], keep="first", inplace=True
+        tmp = fund.format_dataframe() if isinstance(fund, EMFund) else fund
+        if len(self.pdata) == 0:
+            new = tmp
+        else:
+            idx = ~(tmp["Code"] + tmp["TradingDay"]).isin(
+                self.pdata["Code"] + self.pdata["TradingDay"]
             )
+            new = tmp[idx]
+        if not self.local:
+            if self.db_conn is None:
+                self.connect()
+            new.to_sql(NAME_TAB, self.db_conn, index=False, if_exists="append")
+        self.pdata = pd.concat([self.pdata, new])
         return
 
     def save(self) -> None:
         if self.local:
             self.pdata.to_csv(PATH_LDB, index=False)
+        else:
+            if self.db_conn:
+                self.db_conn.commit()
         return
 
     def make_repo(self, month: bool = False) -> pd.DataFrame:
@@ -154,6 +194,7 @@ class DBFund(object):
             src["year"] = src["TradingDay"].str.slice(0, 4)
             src["month"] = src["TradingDay"].str.slice(5, 7)
             for key, cut in src.groupby(["Code", "year", "month"]):
+                cut.sort_values(["TradingDay"], ascending=False, inplace=True)
                 row = {
                     "Code": key[0],
                     "Name": cut["Name"].values[0],
@@ -166,9 +207,13 @@ class DBFund(object):
             src = self.pdata.copy()
             for cc in src["Code"].unique():
                 cut = src.loc[src["Code"] == cc, :].copy()
+                cut.sort_values(["TradingDay"], ascending=False, inplace=True)
                 row = {"Code": cc, "Name": cut["Name"].values[0]}
                 logger.debug(f"making report for {cc} {row['Name']}")
-                cnt = (pd.to_datetime(cut['TradingDay'].values[0]) - pd.to_datetime(cut['TradingDay'].values[-1])).days
+                cnt = (
+                    pd.to_datetime(cut["TradingDay"].values[0])
+                    - pd.to_datetime(cut["TradingDay"].values[-1])
+                ).days
                 row["TotalReturn"] = (cut["Return"] + 1).prod() - 1
                 row["YearReturn"] = row["TotalReturn"] / cnt * YEAR_TNR
                 row["TotalShapre"] = (row["YearReturn"] - RATE_R_F) / (
@@ -237,7 +282,7 @@ if __name__ == "__main__":
         # 不加参数就是用爬虫爬网页注入数据库
         inject_to_db()
         # 加文件路径就是用本地文件注入数据库
-        # inject_to_db(file="data/copy_db.csv")
+        # inject_to_db(file="data/local_db.csv")
         db.save()
     d1 = db.make_repo(month=False)
     d1.to_csv("data/year_repo.csv", index=False)
