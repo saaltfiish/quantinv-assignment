@@ -21,6 +21,8 @@ from utils import logger
 PAGESIZE = 1000
 # 一年的自然日数
 YEAR_TNR = 365
+# 一年的工作日数
+BDAY_TNR = 252
 # 无风险利率
 RATE_R_F = 0.025
 # 数据库基金个数
@@ -332,7 +334,7 @@ class DBFund(object):
                 row["YearReturn"] = row["TotalReturn"] / cnt * YEAR_TNR
                 # 总夏普
                 row["TotalShapre"] = (row["YearReturn"] - RATE_R_F) / (
-                    np.std(cut["Return"]) * np.sqrt(YEAR_TNR)
+                    np.std(cut["Return"]) * np.sqrt(BDAY_TNR)
                 )
                 # 总最大回撤 = 最低净值 - 1
                 row["TotalMaxDrawDown"] = cut["CumNAV"].min() - 1
@@ -346,7 +348,7 @@ class DBFund(object):
                     row[f"{yy}_Return"] = (yut["Return"].values[:-1] + 1).prod() - 1
                     # 年夏普
                     row[f"{yy}_Shapre"] = (row[f"{yy}_Return"] - RATE_R_F) / (
-                        np.std(yut["Return"]) * np.sqrt(YEAR_TNR)
+                        np.std(yut["Return"]) * np.sqrt(BDAY_TNR)
                     )
                     # 年最大回撤 = 年最低净值 - 1
                     row[f"{yy}_MaxDrawDown"] = yut["CumNAV"].min() - 1
